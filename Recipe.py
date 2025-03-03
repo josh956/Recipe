@@ -42,6 +42,20 @@ def inject_custom_css():
         unsafe_allow_html=True
     )
 
+def normalize_ingredient_name(name: str) -> str:
+    """
+    Convert 'all-purpose flour' -> 'all purpose flour', remove punctuation,
+    lowercase, etc. to help match step ingredient names to the original map.
+    """
+    # Replace hyphens with spaces
+    name = name.replace("-", " ")
+    # Remove punctuation except for letters, numbers, underscores, spaces
+    name = re.sub(r"[^\w\s]", "", name)
+    # Convert multiple spaces to a single space
+    name = re.sub(r"\s+", " ", name)
+    # Strip leading/trailing spaces and lowercase
+    return name.strip().lower()
+
 def fetch_recipe(recipe_url):
     api_url = "https://spoonacular-recipe-food-nutrition-v1.p.rapidapi.com/recipes/extract"
     querystring = {"url": recipe_url}
@@ -102,14 +116,15 @@ def extract_unique_equipment(recipe):
 
 def build_ingredient_original_map(extended_ingredients):
     """
-    Create a lookup dictionary mapping the ingredient's lowercase name
+    Create a lookup dictionary mapping the ingredient's *normalized* name
     to the exact "original" text (the same text shown in the Ingredients list).
     """
     original_map = {}
     for ing in extended_ingredients:
-        name_lower = ing.get("name", "").lower()
+        raw_name = ing.get("name", "")
         original_str = ing.get("original", "")
-        original_map[name_lower] = original_str
+        norm = normalize_ingredient_name(raw_name)
+        original_map[norm] = original_str
     return original_map
 
 def calculate_nutrition_and_cost(ingredients_text, servings):
@@ -139,6 +154,72 @@ def calculate_nutrition_and_cost(ingredients_text, servings):
         return result
     except Exception as e:
         st.error("Error calculating nutrition and cost: " + str(e))
+        return None
+
+def infer_step_ingredient_amounts(recipe):
+    """
+    Makes an additional GPT call to infer how much of each ingredient is used in each step.
+    Returns a dict of the form:
+    {
+      "1": {
+         "all-purpose flour": "1 cup",
+         "salt": "1 tsp"
+      },
+      "2": { ... },
+      ...
+    }
+    or None if parsing fails.
+    """
+
+    # Gather the entire instructions text in a user-friendly way
+    instructions = recipe.get("analyzedInstructions", [])
+    steps_text = []
+    for instr in instructions:
+        for step in instr.get("steps", []):
+            step_number = step.get("number", 0)
+            step_content = step.get("step", "")
+            steps_text.append(f"Step {step_number}: {step_content}")
+    full_instructions = "\n".join(steps_text)
+
+    # Gather the full ingredient list (with total amounts)
+    extended_ingredients = recipe.get("extendedIngredients", [])
+    full_ingredients_text = "\n".join([ing["original"] for ing in extended_ingredients])
+
+    # Construct the prompt for GPT
+    # We ask GPT to read the instructions, read the ingredient list, and estimate usage per step.
+    prompt = (
+        "You are a cooking assistant. I have a recipe with instructions and a list of ingredients. "
+        "The instructions do not specify exactly how much of each ingredient is used in each step. "
+        "Using your best judgment, infer approximate step-by-step ingredient amounts. "
+        "Only list ingredients that actually appear in that step. "
+        "Return a JSON object mapping each step number (as a string) to an object with "
+        "'ingredient name' : 'approximate amount' pairs. "
+        "If an ingredient is not used in a step, do not list it for that step.\n\n"
+        f"Instructions:\n{full_instructions}\n\n"
+        f"Ingredients (with total amounts):\n{full_ingredients_text}\n\n"
+        "Return ONLY valid JSON, no code fences, no extra explanation."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a cooking assistant that infers step-level amounts."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+        raw_result = response.choices[0].message.content.strip()
+
+        # Remove triple backticks if present
+        raw_result = re.sub(r"^```[a-zA-Z]*\n?", "", raw_result)
+        raw_result = re.sub(r"```$", "", raw_result).strip()
+
+        # Attempt to parse as JSON
+        data = json.loads(raw_result)
+        return data
+
+    except Exception as e:
+        st.error(f"Error inferring step ingredient amounts: {str(e)}")
         return None
 
 def main():
@@ -183,20 +264,18 @@ def main():
 
             # Calculate total nutrition and cost using the ingredients list via OpenAI API
             if "extendedIngredients" in recipe:
-                # Build a list of the "original" ingredient text
                 ingredients_list = [ing["original"] for ing in recipe["extendedIngredients"]]
                 ingredients_text = "; ".join(ingredients_list)
                 servings = recipe.get("servings", 1)  # default to 1 if not provided
 
-                # Build a map of name -> exact original text
+                # Build a map of normalized name -> exact original text
                 original_map = build_ingredient_original_map(recipe["extendedIngredients"])
                 
                 with st.spinner("Calculating total nutrition and cost..."):
                     result = calculate_nutrition_and_cost(ingredients_text, servings)
                 
                 if result:
-                    import re
-                    # Strip any possible triple backticks or code fences
+                    # Remove code fences if present
                     result = result.strip()
                     result = re.sub(r"^```[a-zA-Z]*\n?", "", result)
                     result = re.sub(r"```$", "", result)
@@ -232,6 +311,11 @@ def main():
                             st.sidebar.error("Failed to parse nutrition and cost: " + str(e))
                     else:
                         st.sidebar.error("Unexpected GPT response: " + result)
+
+            # ---- NEW GPT CALL FOR STEP-LEVEL AMOUNTS ----
+            step_amounts_map = None
+            with st.spinner("Inferring step-level ingredient amounts..."):
+                step_amounts_map = infer_step_ingredient_amounts(recipe)
             
             # Main content: Title, Image, and Summary
             st.header(recipe.get("title", "Recipe Title"))
@@ -268,28 +352,33 @@ def main():
                 if instructions:
                     for instr in instructions:
                         for step in instr.get("steps", []):
-                            st.markdown(f"**Step {step['number']}:** {step['step']}")
+                            step_num = step.get("number", 0)
+                            st.markdown(f"**Step {step_num}:** {step['step']}")
 
-                            # Show EXACT same text as in the "Ingredients" tab
-                            # by cross-referencing the ingredient's name in original_map
-                            if step.get("ingredients"):
-                                ing_list = []
-                                for ing in step["ingredients"]:
-                                    actual_name = ing.get("name", "")
-                                    name_lower = actual_name.lower()
-                                    # If found in the original map, display the "original" text
-                                    if name_lower in original_map:
-                                        ing_list.append(original_map[name_lower])
-                                    else:
-                                        # Fallback to the raw name if no match
-                                        ing_list.append(actual_name)
-                                ing_names = ", ".join(ing_list)
-                                st.write("Ingredients for this step: " + ing_names)
-                            
                             # Show equipment
                             if step.get("equipment"):
                                 equip_names = ", ".join([equip["name"] for equip in step["equipment"]])
                                 st.write("Equipment: " + equip_names)
+
+                            # If we got a step-level ingredient usage map from GPT
+                            # we attempt to display GPT's guessed amounts for this step.
+                            if step_amounts_map and str(step_num) in step_amounts_map:
+                                # It's a dictionary of { ingredientName: "approximate amount" }
+                                usage_dict = step_amounts_map[str(step_num)]
+                                if usage_dict:
+                                    # Format them as bullet points or a single line
+                                    # E.g. "Flour: 1 cup, Salt: 1 tsp"
+                                    usage_strings = []
+                                    for ing_name, amt in usage_dict.items():
+                                        usage_strings.append(f"{ing_name}: {amt}")
+                                    usage_line = ", ".join(usage_strings)
+                                    st.write("**GPT-Inferred Ingredient Amounts:** " + usage_line)
+                            else:
+                                # fallback: just show the ingredient names from Spoonacular
+                                if step.get("ingredients"):
+                                    ing_names = ", ".join([ing["name"] for ing in step["ingredients"]])
+                                    st.write("Ingredients for this step: " + ing_names)
+
                             st.markdown("---")
                 else:
                     st.write("No instructions available.")
@@ -302,7 +391,7 @@ st.markdown(
     """
     <hr>
     <p style="text-align: center;">
-    <b>Recipe App</b> &copy; 2025<br>
+    <b>CO₂ Emissions Calculator</b> &copy; 2025<br>
     Developed by <a href="https://www.linkedin.com/in/josh-poresky956/" target="_blank">Josh Poresky</a><br><br>
     </p>
     """,
