@@ -220,7 +220,6 @@ def main():
         if recipe:
             # Sidebar: Recipe Details & Nutrition Metrics
             st.sidebar.title("Recipe Details")
-            st.sidebar.image(recipe["image"], use_container_width=True)
             st.sidebar.markdown(f"**Ready in:** {recipe.get('readyInMinutes', 'N/A')} minutes")
             st.sidebar.markdown(f"**Servings:** {recipe.get('servings', 'N/A')}")
             
