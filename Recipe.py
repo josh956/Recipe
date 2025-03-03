@@ -209,9 +209,9 @@ def analyze_health_of_meal(recipe):
         return None
 
 def main():
-    st.set_page_config(page_title="Delicious Recipe Viewer", layout="wide")
+    st.set_page_config(page_title="Recipe Viewer", layout="wide")
     inject_custom_css()
-    st.title("Delicious Recipe Viewer")
+    st.title("Recipe Viewer")
     
     recipe_url = st.text_input("Enter the Recipe URL:", "https://natashaskitchen.com/salmon-cakes-recipe/")
     if st.button("Fetch Recipe"):
@@ -339,7 +339,7 @@ st.markdown(
     """
     <hr>
     <p style="text-align: center;">
-    <b>CO₂ Emissions Calculator</b> &copy; 2025<br>
+    <b>Recipe Viewer"</b> &copy; 2025<br>
     Developed by <a href="https://www.linkedin.com/in/josh-poresky956/" target="_blank">Josh Poresky</a><br><br>
     </p>
     """,
