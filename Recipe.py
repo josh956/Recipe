@@ -339,7 +339,7 @@ st.markdown(
     """
     <hr>
     <p style="text-align: center;">
-    <b>Recipe Viewer"</b> &copy; 2025<br>
+    <b>Recipe Viewer</b> &copy; 2025<br>
     Developed by <a href="https://www.linkedin.com/in/josh-poresky956/" target="_blank">Josh Poresky</a><br><br>
     </p>
     """,
